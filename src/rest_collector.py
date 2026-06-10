@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 from .config import Config
-from .rate_limit import PRIORITY_BACKFILL, PRIORITY_REALTIME, get_limiter, weight_for
+from .rate_limit import (
+    PRIORITY_BACKFILL,
+    PRIORITY_REALTIME,
+    get_futures_data_limiter,
+    get_limiter,
+    is_futures_data_path,
+    weight_for,
+)
 from .storage import MarketStore
 
 log = logging.getLogger(__name__)
@@ -29,7 +37,14 @@ class RestCollector:
         self.session.headers.update({"User-Agent": "market-data-collector/2.0"})
         self._onboard_dates: dict[str, int] = {}
         self._limiter = get_limiter(config.rate_limit_max_weight, config.backfill_max_weight)
-        self._priority = PRIORITY_REALTIME
+        self._futures_data = get_futures_data_limiter(config.futures_data_max_per_5min)
+        self._priority_local = threading.local()
+
+    def _get_priority(self) -> str:
+        return getattr(self._priority_local, "value", PRIORITY_REALTIME)
+
+    def _set_priority(self, value: str) -> None:
+        self._priority_local.value = value
 
     class _BackfillScope:
         def __init__(self, collector: RestCollector):
@@ -37,11 +52,11 @@ class RestCollector:
             self._prev = PRIORITY_REALTIME
 
         def __enter__(self) -> None:
-            self._prev = self._collector._priority
-            self._collector._priority = PRIORITY_BACKFILL
+            self._prev = self._collector._get_priority()
+            self._collector._set_priority(PRIORITY_BACKFILL)
 
         def __exit__(self, *_) -> None:
-            self._collector._priority = self._prev
+            self._collector._set_priority(self._prev)
 
     def backfill_scope(self) -> _BackfillScope:
         """回填任务内使用，限制权重走低速通道。"""
@@ -50,14 +65,18 @@ class RestCollector:
     def _get(self, path: str, params: dict | None = None, *, priority: str | None = None) -> object:
         url = f"{self.config.rest_base}{path}"
         w = weight_for(path, params)
-        prio = priority if priority is not None else self._priority
+        prio = priority if priority is not None else self._get_priority()
         last_exc: Exception | None = None
         for attempt in range(5):
+            if is_futures_data_path(path):
+                self._futures_data.acquire()
             self._limiter.acquire(w, prio)
             resp = self.session.get(url, params=params, timeout=30)
             if resp.status_code == 429:
                 retry = int(resp.headers.get("Retry-After", 60))
                 log.warning("429 %s (attempt %d), 冷却 %ds", path, attempt + 1, retry)
+                if is_futures_data_path(path):
+                    self._futures_data.penalize(retry)
                 self._limiter.penalize(retry)
                 last_exc = requests.HTTPError(f"429 for {path}", response=resp)
                 continue
@@ -266,6 +285,52 @@ class RestCollector:
         self.store.insert_agg_trades(rows)
         log.info("轮询聚合成交: %d 条", len(rows))
 
+    def fill_agg_trades_gaps(self) -> None:
+        """P1：自库内最新 trade_time 起 REST 补缺（24h 内，≤1h 窗口）。"""
+        if not self.config.agg_gap_fill_enabled:
+            return
+        now = int(time.time() * 1000)
+        window_start = now - 86_400_000
+        filled = 0
+        for symbol in self.config.symbols:
+            row = self.store.query(
+                "SELECT MAX(trade_time) AS t FROM agg_trades WHERE symbol=?", [symbol],
+            )
+            last_t = int(row[0]["t"]) if row and row[0]["t"] else window_start
+            if now - last_t < 15_000:
+                continue
+            cursor = max(last_t + 1, window_start)
+            while cursor < now:
+                end = min(cursor + 3_599_000, now)
+                try:
+                    data = self._get("/fapi/v1/aggTrades", {
+                        "symbol": symbol,
+                        "startTime": cursor,
+                        "endTime": end,
+                        "limit": 1000,
+                    }, priority=PRIORITY_REALTIME)
+                except requests.HTTPError as e:
+                    log.warning("agg 缺口回补 %s 失败: %s", symbol, e)
+                    break
+                if not data:
+                    cursor = end + 1
+                    continue
+                rows = [
+                    (symbol, int(t["a"]), float(t["p"]), float(t["q"]),
+                     int(t["T"]), int(t["m"]))
+                    for t in data
+                ]
+                self.store.insert_agg_trades(rows)
+                filled += len(rows)
+                last_trade = int(data[-1]["T"])
+                if last_trade <= cursor:
+                    break
+                cursor = last_trade + 1
+                if len(data) < 1000:
+                    cursor = max(cursor, end + 1)
+        if filled:
+            log.info("agg REST 缺口回补: %d 条", filled)
+
     def fetch_open_interest(self) -> None:
         rows = []
         for symbol in self.config.symbols:
@@ -418,13 +483,27 @@ class RestCollector:
             self.store.insert_book_tickers(rows)
             log.debug("REST book_ticker: %d 条", len(rows))
 
+    def fetch_depth_snapshot(self, symbol: str, *, reason: str = "") -> int:
+        """单币种 L2 REST 快照（实时最高优先级）。"""
+        limit = self.config.l2_snapshot_limit
+        data = self._get(
+            "/fapi/v1/depth",
+            {"symbol": symbol, "limit": limit},
+            priority=PRIORITY_REALTIME,
+        )
+        last_id = int(data["lastUpdateId"])
+        ts = int(time.time() * 1000)
+        self.store.insert_depth_snapshot(
+            symbol, json.dumps(data["bids"]), json.dumps(data["asks"]),
+            last_id, ts,
+        )
+        if reason:
+            log.debug("depth snapshot %s id=%d (%s)", symbol, last_id, reason)
+        return last_id
+
     def fetch_depth_snapshots(self) -> None:
         for symbol in self.config.symbols:
-            data = self._get("/fapi/v1/depth", {"symbol": symbol, "limit": 1000})
-            self.store.insert_depth_snapshot(
-                symbol, json.dumps(data["bids"]), json.dumps(data["asks"]),
-                int(data["lastUpdateId"]), int(time.time() * 1000),
-            )
+            self.fetch_depth_snapshot(symbol, reason="scheduled")
 
     def fetch_mark_prices_rest(self) -> None:
         """REST 兜底：WS markPrice 停更时保持标记价新鲜（用本地时间戳写入）。"""

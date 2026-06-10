@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from .config import Config
+from .rate_limit import get_futures_data_limiter, get_limiter
 from .storage import ALL_TABLES, MarketStore
 from . import tick as tick_svc
 from .health import stream_status
@@ -40,10 +41,24 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
     @app.get("/health")
     def health():
         streams = stream_status(store, config.symbols)
+        l2_ok = streams.get("l2_open_gaps_total", 0) == 0
+        trade_ok = all(
+            not s.get("is_trade_stale", False)
+            for s in streams.get("symbols", {}).values()
+        )
+        status = "ok" if l2_ok and trade_ok else "degraded"
         return {
-            "status": "ok",
+            "status": status,
             "symbols": config.symbols,
-            "rate_limit": None,
+            "rate_limit": {
+                **get_limiter().snapshot(),
+                "futures_data": get_futures_data_limiter().snapshot(),
+            },
+            "l2": {
+                "snapshot_interval_s": config.l2_snapshot_interval,
+                "snapshot_limit": config.l2_snapshot_limit,
+                "open_gaps": streams.get("l2_open_gaps_total", 0),
+            },
             "streams": streams,
         }
 

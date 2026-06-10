@@ -20,6 +20,7 @@ ALL_TABLES = [
     "ticker_price",
     "depth_snapshots",
     "depth_updates",
+    "depth_gaps",
     "open_interest",
     "open_interest_hist",
     "funding_rates",
@@ -107,6 +108,13 @@ class MarketStore:
             final_update_id INTEGER, prev_update_id INTEGER, bids TEXT NOT NULL,
             asks TEXT NOT NULL,
             PRIMARY KEY (symbol, final_update_id)
+        );
+        CREATE TABLE IF NOT EXISTS depth_gaps (
+            symbol TEXT NOT NULL, gap_start_ms INTEGER NOT NULL,
+            gap_end_ms INTEGER, reason TEXT NOT NULL,
+            last_u_before INTEGER, snapshot_after_id INTEGER,
+            closed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (symbol, gap_start_ms)
         );
         CREATE TABLE IF NOT EXISTS open_interest (
             symbol TEXT NOT NULL, open_interest REAL NOT NULL, event_time INTEGER NOT NULL,
@@ -312,6 +320,46 @@ class MarketStore:
         self.executemany(
             "INSERT OR IGNORE INTO depth_updates VALUES (?,?,?,?,?,?,?)", rows
         )
+
+    def open_depth_gap(
+        self, symbol: str, start_ms: int, reason: str, last_u_before: int | None
+    ) -> None:
+        self.execute(
+            "INSERT OR IGNORE INTO depth_gaps "
+            "(symbol, gap_start_ms, reason, last_u_before, closed) VALUES (?,?,?,?,0)",
+            [symbol, start_ms, reason, last_u_before],
+        )
+
+    def close_depth_gap(
+        self, symbol: str, end_ms: int, snapshot_id: int, reason: str
+    ) -> None:
+        self.execute(
+            "UPDATE depth_gaps SET gap_end_ms=?, snapshot_after_id=?, closed=1 "
+            "WHERE rowid = ("
+            "  SELECT rowid FROM depth_gaps "
+            "  WHERE symbol=? AND closed=0 AND reason=? "
+            "  ORDER BY gap_start_ms DESC LIMIT 1"
+            ")",
+            [end_ms, snapshot_id, symbol, reason],
+        )
+
+    def close_all_depth_gaps(self, symbol: str, end_ms: int, snapshot_id: int) -> int:
+        """重连快照成功后关闭该 symbol 全部未闭合缺口。"""
+        rows = self.query(
+            "SELECT COUNT(*) AS n FROM depth_gaps WHERE symbol=? AND closed=0", [symbol],
+        )
+        n = int(rows[0]["n"]) if rows else 0
+        if n:
+            self.execute(
+                "UPDATE depth_gaps SET gap_end_ms=?, snapshot_after_id=?, closed=1 "
+                "WHERE symbol=? AND closed=0",
+                [end_ms, snapshot_id, symbol],
+            )
+        return n
+
+    def count_open_depth_gaps(self) -> int:
+        rows = self.query("SELECT COUNT(*) AS n FROM depth_gaps WHERE closed=0")
+        return int(rows[0]["n"]) if rows else 0
 
     def insert_open_interest(self, rows: list[tuple]) -> None:
         self.executemany("INSERT OR IGNORE INTO open_interest VALUES (?,?,?)", rows)

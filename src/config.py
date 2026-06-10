@@ -26,6 +26,17 @@ class Config:
     backfill_historical_sleep: float = 8.0
     backfill_recent_sleep: float = 2.0
     backfill_batches_per_round: int = 3
+    l2_snapshot_interval: int = 10
+    l2_snapshot_limit: int = 1000
+    ws_stale_agg_s: float = 45
+    ws_stale_book_s: float = 45
+    ws_stale_mark_s: float = 30
+    ws_stale_kline_s: float = 120
+    ws_watchdog_interval_s: float = 15
+    agg_gap_fill_enabled: bool = True
+    backfill_startup_delay_s: int = 600
+    backfill_defer_30d_full: bool = True
+    futures_data_max_per_5min: int = 900
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
@@ -54,4 +65,17 @@ class Config:
             backfill_historical_sleep=raw.get("rate_limit", {}).get("backfill_historical_sleep", 8.0),
             backfill_recent_sleep=raw.get("rate_limit", {}).get("backfill_recent_sleep", 2.0),
             backfill_batches_per_round=raw.get("rate_limit", {}).get("batches_per_round", 3),
+            l2_snapshot_interval=raw.get("l2", {}).get("snapshot_interval", 10),
+            l2_snapshot_limit=raw.get("l2", {}).get("snapshot_limit", 1000),
+            ws_stale_agg_s=raw.get("realtime", {}).get("ws_stale_agg_s", 45),
+            ws_stale_book_s=raw.get("realtime", {}).get("ws_stale_book_s", 45),
+            ws_stale_mark_s=raw.get("realtime", {}).get("ws_stale_mark_s", 30),
+            ws_stale_kline_s=raw.get("realtime", {}).get("ws_stale_kline_s", 120),
+            ws_watchdog_interval_s=raw.get("realtime", {}).get("watchdog_interval_s", 15),
+            agg_gap_fill_enabled=raw.get("realtime", {}).get("agg_gap_fill", True),
+            backfill_startup_delay_s=raw.get("backfill", {}).get("startup_delay_s", 600),
+            backfill_defer_30d_full=raw.get("backfill", {}).get("defer_30d_full", True),
+            futures_data_max_per_5min=raw.get("rate_limit", {}).get(
+                "futures_data_max_per_5min", 900
+            ),
         )

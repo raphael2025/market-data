@@ -252,7 +252,12 @@ sudo systemctl restart market-data
 | **REST 定时任务** | book/mark/depth 兜底、持仓量等 | `max_weight_per_minute` 主通道 |
 | **REST 历史回填** | 24h 以外 K 线、资金费率历史等 | 独立 `backfill_max_weight_per_minute`，每批后 sleep 8s |
 
-深度增量 `depth_updates` 等**官方拉不到历史**的数据，只靠 WS 实时写入，回填不会挤占其 REST 配额。
+**L2 优先**（`DepthGuardian`）：
+- 独立 WS `depth` 连接（`depth@100ms` + `depth20@100ms`）
+- 启动 / 重连 / 跳号 / 断连时自动 REST 快照桥接（`limit=1000`，默认每 10s 冗余快照）
+- `pu` 序号校验，缺口写入 `depth_gaps` 表；`/health` 中 `l2.open_gaps=0` 为正常
+
+深度增量 `depth_updates` **币安无历史 API**，断连期间 100ms diff 不可回补，但快照锚点保证订单簿状态可重建。
 
 ---
 

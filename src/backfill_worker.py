@@ -130,24 +130,19 @@ class BackfillWorker:
 
     def _run(self) -> None:
         try:
-            # 阶段1：24h 内可 REST 回补的数据（中等速度）
-            self._run_tier("短周期", [
+            # P1：24h 极短 REST 窗口（启动时一次性拉满）
+            self._run_tier("短窗口", [
                 ("exchange_info", self.rest.fetch_exchange_info),
                 ("agg_trades_24h", self.rest.backfill_agg_trades_24h),
-                ("delivery_prices", self.rest.fetch_delivery_prices),
             ])
 
-            # 阶段2-3：平台历史统计（低速通道）
-            self._run_tier("30天统计", [
-                ("open_interest_hist", lambda: self.rest.fetch_open_interest_hist(full=True)),
-                ("long_short_ratio", lambda: self.rest.fetch_long_short_ratios(full=True)),
-                ("basis", lambda: self.rest.fetch_basis(full=True)),
-            ])
-            self._run_tier("中等历史", [
-                ("funding_rates", lambda: self.rest.fetch_funding_rates(full=True)),
-            ])
+            # 让路 P0/P1 实时采集
+            delay = self.config.backfill_startup_delay_s
+            if delay > 0:
+                log.info("长历史回填延迟 %ds，优先保障 WS/极短 REST", delay)
+                self._pause(delay)
 
-            # 阶段4：24h 以外长历史 K 线 — 低速、每轮限量
+            # P3：长历史 K 线 — 最低优先级、每轮限量
             self._kline_tasks = self._build_kline_tasks()
             log.info("长历史 K 线: %d 个任务待低速回填", len(self._kline_tasks))
 
@@ -159,9 +154,23 @@ class BackfillWorker:
                 else:
                     idle_rounds += 1
                     if idle_rounds >= 3:
-                        log.info("历史回填全部完成，进入每小时增量维护")
+                        log.info("K 线历史回填完成")
                         break
                     self._pause(5)
+
+            # P2/P3：K 线完成后才做 30 天统计与资金费率全量（定时任务负责增量）
+            if not self.config.backfill_defer_30d_full:
+                self._run_tier("30天统计", [
+                    ("open_interest_hist", lambda: self.rest.fetch_open_interest_hist(full=True)),
+                    ("long_short_ratio", lambda: self.rest.fetch_long_short_ratios(full=True)),
+                    ("basis", lambda: self.rest.fetch_basis(full=True)),
+                ])
+                self._run_tier("中等历史", [
+                    ("funding_rates", lambda: self.rest.fetch_funding_rates(full=True)),
+                    ("delivery_prices", self.rest.fetch_delivery_prices),
+                ])
+            else:
+                log.info("30 天统计全量回填已推迟，由定时 REST 增量维护")
 
             while not self._stop.is_set():
                 self._pause(3600)
