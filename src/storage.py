@@ -273,7 +273,7 @@ class MarketStore:
 
     def upsert_continuous_klines(self, rows: list[tuple]) -> None:
         self.executemany(
-            "INSERT OR REPLACE INTO continuous_klines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO continuous_klines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
 
