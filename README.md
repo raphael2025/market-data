@@ -244,6 +244,16 @@ backfill_days: 0      # 0 = 从合约上线日起尽可能回填
 sudo systemctl restart market-data
 ```
 
+### 回填 vs 实时优先级
+
+| 通道 | 数据 | 策略 |
+|------|------|------|
+| **WebSocket**（最高） | mark/book/depth/trade/kline 实时 | 不占 REST 权重 |
+| **REST 定时任务** | book/mark/depth 兜底、持仓量等 | `max_weight_per_minute` 主通道 |
+| **REST 历史回填** | 24h 以外 K 线、资金费率历史等 | 独立 `backfill_max_weight_per_minute`，每批后 sleep 8s |
+
+深度增量 `depth_updates` 等**官方拉不到历史**的数据，只靠 WS 实时写入，回填不会挤占其 REST 配额。
+
 ---
 
 ## 其他项目接入

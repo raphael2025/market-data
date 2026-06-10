@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from .config import Config
+from .rate_limit import PRIORITY_BACKFILL, PRIORITY_REALTIME, get_limiter, weight_for
 from .storage import MarketStore
 
 log = logging.getLogger(__name__)
@@ -27,10 +28,47 @@ class RestCollector:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "market-data-collector/2.0"})
         self._onboard_dates: dict[str, int] = {}
+        self._limiter = get_limiter(config.rate_limit_max_weight, config.backfill_max_weight)
+        self._priority = PRIORITY_REALTIME
 
-    def _get(self, path: str, params: dict | None = None) -> object:
+    class _BackfillScope:
+        def __init__(self, collector: RestCollector):
+            self._collector = collector
+            self._prev = PRIORITY_REALTIME
+
+        def __enter__(self) -> None:
+            self._prev = self._collector._priority
+            self._collector._priority = PRIORITY_BACKFILL
+
+        def __exit__(self, *_) -> None:
+            self._collector._priority = self._prev
+
+    def backfill_scope(self) -> _BackfillScope:
+        """回填任务内使用，限制权重走低速通道。"""
+        return RestCollector._BackfillScope(self)
+
+    def _get(self, path: str, params: dict | None = None, *, priority: str | None = None) -> object:
         url = f"{self.config.rest_base}{path}"
-        resp = self.session.get(url, params=params, timeout=30)
+        w = weight_for(path, params)
+        prio = priority if priority is not None else self._priority
+        last_exc: Exception | None = None
+        for attempt in range(5):
+            self._limiter.acquire(w, prio)
+            resp = self.session.get(url, params=params, timeout=30)
+            if resp.status_code == 429:
+                retry = int(resp.headers.get("Retry-After", 60))
+                log.warning("429 %s (attempt %d), 冷却 %ds", path, attempt + 1, retry)
+                self._limiter.penalize(retry)
+                last_exc = requests.HTTPError(f"429 for {path}", response=resp)
+                continue
+            try:
+                resp.raise_for_status()
+                return resp.json()
+            except requests.HTTPError as exc:
+                last_exc = exc
+                raise
+        if last_exc:
+            raise last_exc
         resp.raise_for_status()
         return resp.json()
 
@@ -92,29 +130,38 @@ class RestCollector:
         now = int(time.time() * 1000)
         return start_ms >= now
 
-    def backfill_kline_batch(self, task) -> tuple[bool, int]:
-        """执行单个 K 线任务的一批（最多 1500 条），返回 (是否完成, 写入条数)。"""
+    def backfill_kline_batch(self, task) -> tuple[bool, int, bool]:
+        """执行单个 K 线任务的一批（最多 1500 条）。
+
+        返回 (是否完成, 写入条数, 是否历史批次即 cursor 在 24h 以前)。
+        """
         t = task
         cursor = self._kline_cursor(t.table, t.key_col, t.key_val, t.interval)
         now = int(time.time() * 1000)
         if cursor >= now:
-            return True, 0
+            return True, 0, False
 
+        is_historical = cursor < now - 86_400_000
         params: dict = {t.key_col: t.key_val, "interval": t.interval, "startTime": cursor, "limit": 1500}
         if t.extra:
             params.update(t.extra)
         try:
-            data = self._get(t.path, params)
+            data = self._get(t.path, params, priority=PRIORITY_BACKFILL)
         except requests.HTTPError:
-            return True, 0
+            return False, 0, is_historical
         if not data:
-            return True, 0
+            return True, 0, is_historical
 
         parser = self._parser_for_table(t.table)
         rows = parser(t.key_val, t.interval, data, t.extra or None)
         self._upsert_for_table(t.table)(rows)
         next_cursor = int(data[-1][0]) + INTERVAL_MS[t.interval]
-        return next_cursor >= now, len(rows)
+        done = next_cursor >= now
+        if is_historical:
+            time.sleep(self.config.backfill_historical_sleep)
+        else:
+            time.sleep(self.config.backfill_recent_sleep)
+        return done, len(rows), is_historical
 
     def backfill_agg_trades_24h(self) -> None:
         """回填最近 24h 聚合成交（币安 REST 窗口限制）。"""
@@ -127,7 +174,7 @@ class RestCollector:
                 try:
                     data = self._get("/fapi/v1/aggTrades", {
                         "symbol": symbol, "startTime": cursor, "limit": 1000,
-                    })
+                    }, priority=PRIORITY_BACKFILL)
                 except requests.HTTPError:
                     break
                 if not data:
@@ -143,7 +190,7 @@ class RestCollector:
                 if last_t <= cursor:
                     break
                 cursor = last_t + 1
-                time.sleep(0.1)
+                time.sleep(self.config.backfill_agg_trades_sleep)
         log.info("回填 24h 聚合成交: %d 条", total)
 
     def incremental_backfill_round(self) -> None:

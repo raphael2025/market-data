@@ -63,5 +63,15 @@ schedules:
   trades_poll: 10
   agg_trades_poll: 60
 
+# REST 权重限流（币安全 IP 上限 2400/min）
+# 实时 REST 兜底 + WS 优先；历史回填走独立低速通道
+rate_limit:
+  max_weight_per_minute: 1800      # 实时任务可用总权重
+  backfill_max_weight_per_minute: 350  # 历史回填独立上限（24h 以外低速）
+  backfill_agg_trades_sleep: 1.0     # 24h 内 aggTrades 回填间隔
+  backfill_historical_sleep: 8.0     # 24h 以外 K 线每批后暂停（秒）
+  backfill_recent_sleep: 2.0         # 24h 内回填任务间隔
+  batches_per_round: 3               # 每轮回填最多批次数，然后让路实时
+
 # 历史回填：0 = 尽可能久远（从合约上线日起）
 backfill_days: 0

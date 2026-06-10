@@ -38,12 +38,12 @@ class KlineTask:
 
 
 class BackfillWorker:
-    """后台历史回填：短周期数据优先，长历史 K 线分批让路实时采集。"""
+    """后台历史回填：24h 以外低速回填，实时数据（WS/REST 兜底）优先。"""
 
-    def __init__(self, config: Config, store: MarketStore):
+    def __init__(self, config: Config, store: MarketStore, rest: RestCollector | None = None):
         self.config = config
         self.store = store
-        self.rest = RestCollector(config, store)
+        self.rest = rest if rest is not None else RestCollector(config, store)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._kline_tasks: list[KlineTask] = []
@@ -53,27 +53,31 @@ class BackfillWorker:
             return
         self._thread = threading.Thread(target=self._run, name="backfill-worker", daemon=True)
         self._thread.start()
-        log.info("后台回填线程已启动（实时采集优先）")
+        log.info(
+            "后台回填线程已启动（历史低速: sleep=%.0fs, 每轮最多 %d 批）",
+            self.config.backfill_historical_sleep,
+            self.config.backfill_batches_per_round,
+        )
 
     def stop(self) -> None:
         self._stop.set()
 
-    def _pause(self, seconds: float = 1.5) -> None:
-        """每步回填后暂停，把 DB/API 让给实时任务。"""
+    def _pause(self, seconds: float) -> None:
         if self._stop.wait(seconds):
             return
 
     def _run_tier(self, name: str, tasks: list[tuple[str, Callable[[], None]]]) -> None:
         log.info("回填阶段 [%s] 开始 (%d 项)", name, len(tasks))
-        for label, fn in tasks:
-            if self._stop.is_set():
-                return
-            try:
-                log.info("回填任务: %s", label)
-                fn()
-            except Exception as e:
-                log.warning("回填任务 %s 失败: %s", label, e)
-            self._pause(1.0)
+        with self.rest.backfill_scope():
+            for label, fn in tasks:
+                if self._stop.is_set():
+                    return
+                try:
+                    log.info("回填任务: %s", label)
+                    fn()
+                except Exception as e:
+                    log.warning("回填任务 %s 失败: %s", label, e)
+                self._pause(self.config.backfill_recent_sleep)
         log.info("回填阶段 [%s] 完成", name)
 
     def _build_kline_tasks(self) -> list[KlineTask]:
@@ -91,54 +95,67 @@ class BackfillWorker:
         return tasks
 
     def _run_kline_round(self) -> bool:
-        """轮询执行每个 K 线任务的一批，返回是否还有未完成项。"""
+        """每轮最多执行 batches_per_round 批，避免挤占实时 REST。"""
         any_pending = False
-        for task in self._kline_tasks:
-            if self._stop.is_set():
-                return False
-            if task.done:
-                continue
-            any_pending = True
-            done, n = self.rest.backfill_kline_batch(task)
-            if n:
-                log.info(
-                    "回填批次 %s %s %s: +%d%s",
-                    task.table, task.key_val, task.interval, n,
-                    " (完成)" if done else "",
-                )
-            task.done = done
-            self._pause(1.5)
+        batches = 0
+        max_batches = self.config.backfill_batches_per_round
+
+        with self.rest.backfill_scope():
+            for task in self._kline_tasks:
+                if self._stop.is_set():
+                    return False
+                if task.done:
+                    continue
+                any_pending = True
+                if batches >= max_batches:
+                    log.debug("本轮回填已达上限 %d 批，让路实时采集", max_batches)
+                    return True
+
+                done, n, is_historical = self.rest.backfill_kline_batch(task)
+                if n:
+                    tag = "历史" if is_historical else "近期"
+                    log.info(
+                        "回填批次 [%s] %s %s %s: +%d%s",
+                        tag, task.table, task.key_val, task.interval, n,
+                        " (完成)" if done else "",
+                    )
+                if done:
+                    task.done = True
+                batches += 1
+                # backfill_kline_batch 内部已 sleep；历史批次额外让路
+                if is_historical:
+                    self._pause(2.0)
+
         return any_pending
 
     def _run(self) -> None:
         try:
-            # 阶段1：短窗口（易过期）
+            # 阶段1：24h 内可 REST 回补的数据（中等速度）
             self._run_tier("短周期", [
                 ("exchange_info", self.rest.fetch_exchange_info),
                 ("agg_trades_24h", self.rest.backfill_agg_trades_24h),
                 ("delivery_prices", self.rest.fetch_delivery_prices),
             ])
 
-            # 阶段2：平台保留约30天的统计数据
+            # 阶段2-3：平台历史统计（低速通道）
             self._run_tier("30天统计", [
                 ("open_interest_hist", lambda: self.rest.fetch_open_interest_hist(full=True)),
                 ("long_short_ratio", lambda: self.rest.fetch_long_short_ratios(full=True)),
                 ("basis", lambda: self.rest.fetch_basis(full=True)),
             ])
-
-            # 阶段3：中等历史
             self._run_tier("中等历史", [
                 ("funding_rates", lambda: self.rest.fetch_funding_rates(full=True)),
             ])
 
-            # 阶段4：长历史 K 线（分批，大周期优先）
+            # 阶段4：24h 以外长历史 K 线 — 低速、每轮限量
             self._kline_tasks = self._build_kline_tasks()
-            log.info("长历史 K 线: %d 个任务待回填", len(self._kline_tasks))
+            log.info("长历史 K 线: %d 个任务待低速回填", len(self._kline_tasks))
 
             idle_rounds = 0
             while not self._stop.is_set():
                 if self._run_kline_round():
                     idle_rounds = 0
+                    self._pause(self.config.backfill_historical_sleep)
                 else:
                     idle_rounds += 1
                     if idle_rounds >= 3:
@@ -146,7 +163,6 @@ class BackfillWorker:
                         break
                     self._pause(5)
 
-            # 完成后定期增量补漏
             while not self._stop.is_set():
                 self._pause(3600)
                 if self._stop.is_set():
@@ -155,7 +171,8 @@ class BackfillWorker:
                 self._kline_tasks = self._build_kline_tasks()
                 if self._kline_tasks:
                     self._run_kline_round()
-                self.rest.incremental_backfill_round()
+                with self.rest.backfill_scope():
+                    self.rest.incremental_backfill_round()
 
             log.info("后台回填线程退出")
         except Exception as e:
