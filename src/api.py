@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from .config import Config
 from .storage import ALL_TABLES, MarketStore
 from . import tick as tick_svc
+from .health import stream_status
 
 
 def _paginate(
@@ -31,14 +32,20 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
     app = FastAPI(
         title="Market Data API",
         description="BTC/ETH/SOL 币安合约本地全量行情 — 无请求限制，仅供本地研究",
-        version="2.1.0",
+        version="2.2.0",
         docs_url="/docs",
         redoc_url="/redoc",
     )
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "symbols": config.symbols, "rate_limit": None}
+        streams = stream_status(store, config.symbols)
+        return {
+            "status": "ok",
+            "symbols": config.symbols,
+            "rate_limit": None,
+            "streams": streams,
+        }
 
     @app.get("/tables")
     def tables():

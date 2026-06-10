@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from urllib.parse import urlencode
 
 import websockets
@@ -21,11 +22,13 @@ class WsCollector:
         self.store = store
         self._running = False
 
+    def _book_streams(self) -> list[str]:
+        return [f"{s.lower()}@bookTicker" for s in self.config.symbols]
+
     def _public_streams(self) -> list[str]:
         streams = []
         for s in self.config.symbols:
             sym = s.lower()
-            streams.append(f"{sym}@bookTicker")
             streams.append(f"{sym}@depth@100ms")
             streams.append(f"{sym}@depth20@100ms")
         return streams
@@ -50,10 +53,12 @@ class WsCollector:
 
     async def run(self) -> None:
         self._running = True
+        book = self._book_streams()
         pub = self._public_streams()
         mkt = self._market_streams()
-        log.info("WebSocket public=%d market=%d 流", len(pub), len(mkt))
+        log.info("WebSocket book=%d public=%d market=%d 流", len(book), len(pub), len(mkt))
         await asyncio.gather(
+            self._run_connection("book", self._stream_url("public", book)),
             self._run_connection("public", self._stream_url("public", pub)),
             self._run_connection("market", self._stream_url("market", mkt)),
         )
@@ -107,10 +112,11 @@ class WsCollector:
         )])
 
     def _on_book_ticker(self, data: dict) -> None:
+        event_time = int(data.get("E") or data.get("T") or time.time() * 1000)
         self.store.insert_book_tickers([(
             data["s"], float(data["b"]), float(data["B"]),
             float(data["a"]), float(data["A"]),
-            int(data.get("E") or data.get("T", 0)),
+            event_time,
         )])
 
     def _on_kline(self, data: dict) -> None:

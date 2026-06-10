@@ -29,9 +29,24 @@ curl http://localhost:8765/health
 {
   "status": "ok",
   "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-  "rate_limit": null
+  "rate_limit": null,
+  "streams": {
+    "server_time": 1781126747003,
+    "stale_threshold_ms": 30000,
+    "symbols": {
+      "BTCUSDT": {
+        "last_event_ms": {"mark": 1781126747003, "book": 1781126746500, "depth": 1781126740000, "trade": 1781126745000},
+        "age_ms": {"mark": 1200, "book": 1700, "depth": 7000, "trade": 2200},
+        "is_mark_stale": false,
+        "is_book_stale": false,
+        "is_depth_stale": false
+      }
+    }
+  }
 }
 ```
+
+`streams` 用于监控各数据流是否存活；`book_ticker` 有独立 WebSocket 连接 + REST 每 5s 兜底。
 
 服务未启动时：
 
@@ -613,7 +628,7 @@ curl "http://localhost:8765/v1/tick/latest?symbol=BTCUSDT&include_depth=true&dep
 }
 ```
 
-`is_stale` 仅反映 mark + book 是否超过 30s；深度单独看 `depth_age_ms`。
+`is_stale` = `is_mark_stale` OR `is_book_stale`（默认阈值 30s）。paper wallet 市价单仅检查 `is_book_stale`；深度单独看 `depth_age_ms`。
 
 ### `GET /v1/ticks/latest`
 

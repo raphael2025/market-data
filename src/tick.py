@@ -149,11 +149,9 @@ def _assemble(
     book_age = (now - int(book["event_time"])) if book else None
     depth_age = (now - _depth_time(depth)) if depth else None
 
-    is_stale = False
-    if mark_age is not None and mark_age > stale_ms:
-        is_stale = True
-    if book_age is not None and book_age > stale_ms:
-        is_stale = True
+    is_mark_stale = mark_age is not None and mark_age > stale_ms
+    is_book_stale = book_age is not None and book_age > stale_ms
+    is_stale = is_mark_stale or is_book_stale
 
     if funding_rate is None and mark:
         funding_rate = mark.get("funding_rate")
@@ -183,6 +181,8 @@ def _assemble(
             "mark_age_ms": mark_age,
             "book_age_ms": book_age,
             "depth_age_ms": depth_age,
+            "is_mark_stale": is_mark_stale,
+            "is_book_stale": is_book_stale,
             "is_stale": is_stale,
         })
         if funding_source:
@@ -422,6 +422,9 @@ def backtest_bars(
         ts = int(bar["close_time"])
         book = _nearest(store, "book_tickers", "symbol", sym, "event_time", ts)
         fr, ft, _ = _funding_at(store, sym, int(bar["open_time"]))
+        mark_px = bar.get("mark_close")
+        if mark_px is None:
+            mark_px = float(bar["close"])
         item: dict[str, Any] = {
             "open_time": int(bar["open_time"]),
             "close_time": ts,
@@ -430,8 +433,9 @@ def backtest_bars(
             "low": bar["low"],
             "close": bar["close"],
             "volume": bar["volume"],
-            "mark_price": bar.get("mark_close"),
+            "mark_price": mark_px,
             "index_price": bar.get("index_close"),
+            "mark_source": "mark_price_klines" if bar.get("mark_close") else "klines_close",
             "funding_rate": fr,
             "funding_time": ft,
             "best_bid": float(book["bid_price"]) if book else None,

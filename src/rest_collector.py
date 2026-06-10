@@ -344,6 +344,22 @@ class RestCollector:
         self.store.insert_basis(rows)
         log.info("采集基差: %d 条", len(rows))
 
+    def fetch_book_tickers(self) -> None:
+        """REST 兜底：WS bookTicker 停更时保持 bid/ask 新鲜。"""
+        rows = []
+        for symbol in self.config.symbols:
+            data = self._get("/fapi/v1/ticker/book", {"symbol": symbol})
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            rows.append((
+                symbol,
+                float(data["bidPrice"]), float(data["bidQty"]),
+                float(data["askPrice"]), float(data["askQty"]),
+                int(time.time() * 1000),
+            ))
+        self.store.insert_book_tickers(rows)
+        log.debug("REST book_ticker: %d 条", len(rows))
+
     def fetch_depth_snapshots(self) -> None:
         for symbol in self.config.symbols:
             data = self._get("/fapi/v1/depth", {"symbol": symbol, "limit": 1000})

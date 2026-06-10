@@ -54,6 +54,7 @@ schedules:
   ticker_24h: 30
   ticker_price: 30
   basis: 300
+  book_ticker: 5
   depth_snapshot: 15
   mark_prices_rest: 30
   insurance_balance: 3600

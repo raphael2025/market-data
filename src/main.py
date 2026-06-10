@@ -33,6 +33,7 @@ def run_scheduler(rest: RestCollector, schedules: dict[str, int]) -> BackgroundS
         "ticker_24h": (rest.fetch_ticker_24h, schedules.get("ticker_24h", 30)),
         "ticker_price": (rest.fetch_ticker_price, schedules.get("ticker_price", 30)),
         "basis": (rest.fetch_basis, schedules.get("basis", 300)),
+        "book_ticker": (rest.fetch_book_tickers, schedules.get("book_ticker", 5)),
         "depth_snapshot": (rest.fetch_depth_snapshots, schedules.get("depth_snapshot", 15)),
         "mark_prices_rest": (rest.fetch_mark_prices_rest, schedules.get("mark_prices_rest", 30)),
         "insurance_balance": (rest.fetch_insurance_balance, schedules.get("insurance_balance", 3600)),
@@ -55,7 +56,7 @@ def start_realtime(config: Config, store: MarketStore) -> tuple[RestCollector, W
 
     for fn in (
         rest.fetch_open_interest, rest.fetch_ticker_24h, rest.fetch_ticker_price,
-        rest.fetch_depth_snapshots, rest.fetch_mark_prices_rest, rest.fetch_trades,
+        rest.fetch_book_tickers, rest.fetch_depth_snapshots, rest.fetch_mark_prices_rest, rest.fetch_trades,
         rest.fetch_funding_info,
     ):
         try:
