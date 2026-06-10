@@ -56,7 +56,7 @@ schedules:
   basis: 300
   book_ticker: 5
   depth_snapshot: 15
-  mark_prices_rest: 30
+  mark_prices_rest: 15
   insurance_balance: 3600
   delivery_price: 3600
   exchange_info: 86400

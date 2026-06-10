@@ -66,7 +66,13 @@ class WsCollector:
     async def _run_connection(self, name: str, url: str) -> None:
         while self._running:
             try:
-                async with websockets.connect(url, ping_interval=180, ping_timeout=60) as ws:
+                async with websockets.connect(
+                    url,
+                    ping_interval=180,
+                    ping_timeout=60,
+                    open_timeout=30,
+                    close_timeout=10,
+                ) as ws:
                     log.info("WebSocket [%s] 已连接", name)
                     async for raw in ws:
                         msg = json.loads(raw)

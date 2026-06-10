@@ -46,7 +46,9 @@ curl http://localhost:8765/health
 }
 ```
 
-`streams` 用于监控各数据流是否存活；`book_ticker` 有独立 WebSocket 连接 + REST 每 5s 兜底。
+`streams` 用于监控各数据流是否存活；`book_ticker` 有独立 WebSocket 连接 + REST 批量 `/fapi/v1/ticker/bookTicker` 每 5s 兜底；`mark` 有 WS `@markPrice@1s` + REST `/fapi/v1/premiumIndex` 每 15s 兜底。
+
+若 `is_book_stale` / `is_mark_stale` 持续为 true，检查 `logs/collector.log` 并重启服务。
 
 服务未启动时：
 

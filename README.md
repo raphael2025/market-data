@@ -134,7 +134,7 @@ sudo systemctl status market-data
 
 # API 健康检查
 curl http://localhost:8765/health
-# 期望返回: {"status":"ok","symbols":["BTCUSDT","ETHUSDT","SOLUSDT"],"rate_limit":null}
+# 期望返回 status=ok，且 streams 中 is_mark_stale / is_book_stale 均为 false
 
 # 查看数据量
 curl http://localhost:8765/tables
@@ -329,6 +329,15 @@ market-data/
 curl http://localhost:8765/health
 sudo systemctl status market-data
 ```
+
+**Q: `/health` 显示 `is_book_stale` 或 `is_mark_stale` 为 true？**
+
+检查 `logs/collector.log` 是否有 `bookTicker` / `markPrice` 相关错误。常见原因：
+
+- REST 兜底路径错误（应为 `/fapi/v1/ticker/bookTicker`，不是 `/ticker/book`）
+- WebSocket 握手超时（网络慢时 REST 每 5s/15s 兜底应仍保持新鲜）
+
+修复后重启：`sudo systemctl restart market-data`
 
 **Q: 数据库越来越大怎么办？**
 设计为永久保留。如需清理，停止服务后删除 `data/market.db`，重启会自动重建并重新采集。

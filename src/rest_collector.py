@@ -346,19 +346,30 @@ class RestCollector:
 
     def fetch_book_tickers(self) -> None:
         """REST 兜底：WS bookTicker 停更时保持 bid/ask 新鲜。"""
-        rows = []
-        for symbol in self.config.symbols:
-            data = self._get("/fapi/v1/ticker/book", {"symbol": symbol})
-            if isinstance(data, list):
-                data = data[0] if data else {}
+        now = int(time.time() * 1000)
+        sym_set = set(self.config.symbols)
+        rows: list[tuple] = []
+        try:
+            data = self._get("/fapi/v1/ticker/bookTicker")
+        except requests.HTTPError as exc:
+            log.warning("REST bookTicker 批量请求失败: %s", exc)
+            return
+        if isinstance(data, dict):
+            data = [data]
+        for item in data:
+            sym = item.get("symbol")
+            if sym not in sym_set:
+                continue
+            event_time = int(item.get("time") or now)
             rows.append((
-                symbol,
-                float(data["bidPrice"]), float(data["bidQty"]),
-                float(data["askPrice"]), float(data["askQty"]),
-                int(time.time() * 1000),
+                sym,
+                float(item["bidPrice"]), float(item["bidQty"]),
+                float(item["askPrice"]), float(item["askQty"]),
+                event_time,
             ))
-        self.store.insert_book_tickers(rows)
-        log.debug("REST book_ticker: %d 条", len(rows))
+        if rows:
+            self.store.insert_book_tickers(rows)
+            log.debug("REST book_ticker: %d 条", len(rows))
 
     def fetch_depth_snapshots(self) -> None:
         for symbol in self.config.symbols:
@@ -369,12 +380,14 @@ class RestCollector:
             )
 
     def fetch_mark_prices_rest(self) -> None:
+        """REST 兜底：WS markPrice 停更时保持标记价新鲜（用本地时间戳写入）。"""
         rows = []
+        now = int(time.time() * 1000)
         for symbol in self.config.symbols:
             data = self._get("/fapi/v1/premiumIndex", {"symbol": symbol})
             rows.append((
                 symbol, float(data["markPrice"]), float(data["indexPrice"]),
-                float(data["lastFundingRate"]), int(data["nextFundingTime"]), int(data["time"]),
+                float(data["lastFundingRate"]), int(data["nextFundingTime"]), now,
             ))
         self.store.insert_mark_prices(rows)
 
