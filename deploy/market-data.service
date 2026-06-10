@@ -1,0 +1,21 @@
+[Unit]
+Description=Binance Futures Market Data Collector (BTC/ETH/SOL)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=raphael
+Group=raphael
+WorkingDirectory=/home/raphael/market-data
+ExecStart=/home/raphael/market-data/.venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/raphael/market-data/logs/collector.log
+StandardError=append:/home/raphael/market-data/logs/collector.log
+
+# 资源限制放宽（深度/成交数据量大）
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

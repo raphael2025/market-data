@@ -1,0 +1,66 @@
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+
+# 币安支持的全部 K 线周期
+kline_intervals:
+  - 1m
+  - 3m
+  - 5m
+  - 15m
+  - 30m
+  - 1h
+  - 2h
+  - 4h
+  - 6h
+  - 8h
+  - 12h
+  - 1d
+  - 3d
+  - 1w
+  - 1M
+
+# 多空比 / 持仓量历史 / 基差 的全部采样周期
+data_periods:
+  - 5m
+  - 15m
+  - 30m
+  - 1h
+  - 2h
+  - 4h
+  - 6h
+  - 12h
+  - 1d
+
+binance:
+  rest_base: https://fapi.binance.com
+  ws_base: wss://fstream.binance.com
+
+storage:
+  db_path: data/market.db
+
+api:
+  host: 0.0.0.0
+  port: 8765
+
+# REST 定时采集间隔（秒）— 持续写入，永久保留
+schedules:
+  open_interest: 30
+  open_interest_hist: 300
+  funding_rate: 1800
+  funding_info: 3600
+  long_short_ratio: 300
+  ticker_24h: 30
+  ticker_price: 30
+  basis: 300
+  depth_snapshot: 15
+  mark_prices_rest: 30
+  insurance_balance: 3600
+  delivery_price: 3600
+  exchange_info: 86400
+  trades_poll: 10
+  agg_trades_poll: 60
+
+# 历史回填：0 = 尽可能久远（从合约上线日起）
+backfill_days: 0
