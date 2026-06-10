@@ -99,7 +99,7 @@ class MarketStore:
         );
         CREATE TABLE IF NOT EXISTS depth_snapshots (
             symbol TEXT NOT NULL, bids TEXT NOT NULL, asks TEXT NOT NULL,
-            last_update_id INTEGER, snapshot_time INTEGER NOT NULL,
+            snapshot_time INTEGER NOT NULL, last_update_id INTEGER,
             PRIMARY KEY (symbol, snapshot_time)
         );
         CREATE TABLE IF NOT EXISTS depth_updates (
@@ -303,8 +303,9 @@ class MarketStore:
         self, symbol: str, bids: str, asks: str, last_id: int, ts: int
     ) -> None:
         self.execute(
-            "INSERT OR IGNORE INTO depth_snapshots VALUES (?,?,?,?,?)",
-            [symbol, bids, asks, last_id, ts],
+            "INSERT OR IGNORE INTO depth_snapshots "
+            "(symbol, bids, asks, snapshot_time, last_update_id) VALUES (?,?,?,?,?)",
+            [symbol, bids, asks, ts, last_id],
         )
 
     def insert_depth_updates(self, rows: list[tuple]) -> None:

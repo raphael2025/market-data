@@ -44,6 +44,29 @@ sudo systemctl start market-data
 
 ## 快速接入
 
+### Paper Wallet / 模拟交易（推荐）
+
+一次请求获取完整 tick，直接对接 `crypto_paper_wallet`：
+
+```python
+import requests
+
+BASE = "http://localhost:8765"
+
+# 单币种 tick（mark + bid/ask + funding + timestamp）
+tick = requests.get(f"{BASE}/v1/tick/latest", params={"symbol": "BTCUSDT"}).json()
+
+# 多币种批量
+batch = requests.get(f"{BASE}/v1/ticks/latest", params={
+    "symbols": "BTCUSDT,ETHUSDT,SOLUSDT",
+}).json()["ticks"]
+
+# paper wallet 兼容路径（无需改 provider.py 以外的配置）
+tick = requests.get(f"{BASE}/v1/market/tick/BTCUSDT").json()
+```
+
+响应含 `timestamp`（ISO，paper wallet 直接解析）和 `event_time`（毫秒）。
+
 ### Python
 
 ```python
@@ -51,7 +74,7 @@ import requests
 
 BASE = "http://localhost:8765"
 
-# 最新标记价格
+# 最新标记价格（底层接口，一般优先用 /v1/tick/latest）
 r = requests.get(f"{BASE}/v1/mark-price/latest", params={"symbol": "BTCUSDT"})
 mark = r.json()
 print(mark["mark_price"], mark["funding_rate"])
@@ -184,6 +207,18 @@ rows = con.execute("""
 |------|------|------|
 | GET | `/v1/agg-trades` | 聚合成交 |
 | GET | `/v1/trades` | 逐笔成交 |
+
+### 聚合 Tick（paper wallet 对接）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/tick/latest` | 单币种完整 tick |
+| GET | `/v1/ticks/latest` | 多币种批量 tick |
+| GET | `/v1/tick/at` | 历史时刻 tick（回测单点） |
+| GET | `/v1/ticks/range` | 历史 tick 序列（按 K 线周期） |
+| GET | `/v1/backtest/bars` | 回测 bar（OHLCV + mark + funding + bid/ask） |
+| GET | `/v1/market/tick/{symbol}` | paper wallet 兼容别名 |
+| GET | `/v1/market/ticks` | paper wallet 兼容别名 |
 
 ### 价格 / 行情
 
@@ -537,9 +572,118 @@ insurance_balance       delivery_prices         exchange_info
 
 ---
 
+## 聚合 Tick 接口详情
+
+### `GET /v1/tick/latest`
+
+一次返回 paper wallet 所需的完整行情。
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| symbol | 必填 | BTCUSDT / ETHUSDT / SOLUSDT |
+| include_depth | false | 是否附带 L2 深度（结构化数组） |
+| depth_levels | 20 | 深度档数（最大 1000） |
+
+```bash
+curl "http://localhost:8765/v1/tick/latest?symbol=BTCUSDT&include_depth=true&depth_levels=5"
+```
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "mark_price": 61548.0,
+  "index_price": 61569.61,
+  "last_price": 61524.0,
+  "best_bid": 61523.9,
+  "best_ask": 61524.0,
+  "bid_qty": 6.437,
+  "ask_qty": 5.674,
+  "funding_rate": -0.00002898,
+  "next_funding_time": 1781136000000,
+  "bid_depth": [{"price": 61523.9, "qty": 6.437}],
+  "ask_depth": [{"price": 61524.0, "qty": 5.674}],
+  "volume_1m": 53.154,
+  "event_time": 1781126747003,
+  "timestamp": "2026-06-10T21:25:47.003Z",
+  "age_ms": 2590,
+  "mark_age_ms": 2590,
+  "book_age_ms": 26314,
+  "depth_age_ms": 1802,
+  "is_stale": false
+}
+```
+
+`is_stale` 仅反映 mark + book 是否超过 30s；深度单独看 `depth_age_ms`。
+
+### `GET /v1/ticks/latest`
+
+| 参数 | 说明 |
+|------|------|
+| symbols | 逗号分隔，如 `BTCUSDT,ETHUSDT,SOLUSDT` |
+| include_depth | 是否附带深度 |
+| depth_levels | 深度档数 |
+
+```json
+{
+  "ticks": {
+    "BTCUSDT": { "...完整 tick..." },
+    "ETHUSDT": { "...完整 tick..." }
+  },
+  "missing": [],
+  "server_time": 1781126747003
+}
+```
+
+### `GET /v1/tick/at`
+
+回测按历史时间点取最近 tick（as-of join）。
+
+| 参数 | 说明 |
+|------|------|
+| symbol | 交易对 |
+| timestamp | Unix 毫秒 |
+| tolerance_ms | 默认 60000，超出则 404 |
+| include_depth | 是否附带深度 |
+
+历史资金费率优先从 `funding_rates` 表取已结算值，无数据时回退 `mark_prices`。
+
+### `GET /v1/ticks/range`
+
+按 K 线周期批量导出 tick 序列，每根 bar 在 `close_time` 做 as-of 对齐。
+
+| 参数 | 说明 |
+|------|------|
+| symbol / interval | 交易对与周期 |
+| start_time / end_time | open_time 范围（毫秒） |
+| limit / offset | 分页 |
+
+### `GET /v1/backtest/bars`
+
+回测一站式接口：每根 bar 含 OHLCV + mark_close + index_close + funding + bid/ask。
+
+### paper wallet 兼容路径
+
+| 路径 | 等价于 |
+|------|--------|
+| `GET /v1/market/tick/{symbol}` | `/v1/tick/latest?symbol=...` |
+| `GET /v1/market/ticks?symbols=...` | `/v1/ticks/latest?symbols=...` |
+
+配置：`export MARKET_DATA_URL=http://localhost:8765`
+
+---
+
 ## 典型使用场景
 
-### 策略获取最新价 + 资金费率
+### 模拟钱包拉取实时 tick
+
+```python
+tick = requests.get(f"{BASE}/v1/tick/latest", params={"symbol": "BTCUSDT"}).json()
+if tick["is_stale"]:
+    raise RuntimeError("行情过期，拒绝市价单")
+spread = tick["best_ask"] - tick["best_bid"]
+```
+
+### 策略获取最新价 + 资金费率（底层接口）
 
 ```python
 mark = requests.get(f"{BASE}/v1/mark-price/latest", params={"symbol": "BTCUSDT"}).json()
@@ -580,7 +724,7 @@ trades = requests.get(f"{BASE}/v1/agg-trades", params={
 
 1. **数据持续写入**：历史回填在后台进行，早期数据会随时间逐步补全
 2. **排序**：列表接口默认**最新在前**（DESC），回测请自行按 `open_time` 升序
-3. **深度 JSON**：`depth_snapshots` 的 bids/asks 是字符串，需 `json.loads()`
+3. **深度 JSON**：底层 `/v1/depth/*` 的 bids/asks 是字符串；`/v1/tick/*` 已返回结构化 `bid_depth` / `ask_depth`
 4. **ticker_snapshots**：`payload` 字段为原始 WS JSON 字符串
 5. **并发安全**：HTTP API 只读，可与采集服务并行；SQLite 直连请用 `mode=ro`
 6. **服务依赖**：调用前确认 `curl http://localhost:8765/health` 返回 ok

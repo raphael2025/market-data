@@ -274,6 +274,15 @@ ratio = requests.get(f"{BASE}/v1/long-short-ratio", params={
 
 完整接口列表、请求参数、响应字段、分页方式、SQLite 直连方法，见 **[docs/API.md](docs/API.md)**。
 
+对接 `crypto_paper_wallet` 时，优先使用聚合 tick 接口（一次请求拿齐 mark/bid/ask/funding）：
+
+```python
+tick = requests.get(f"{BASE}/v1/tick/latest", params={"symbol": "BTCUSDT"}).json()
+# 或兼容路径：GET /v1/market/tick/BTCUSDT
+```
+
+详见 [docs/IMPROVEMENTS_FOR_PAPER_WALLET.md](docs/IMPROVEMENTS_FOR_PAPER_WALLET.md)。
+
 ---
 
 ## 项目结构

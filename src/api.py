@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Config
 from .storage import ALL_TABLES, MarketStore
+from . import tick as tick_svc
 
 
 def _paginate(
@@ -30,7 +31,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
     app = FastAPI(
         title="Market Data API",
         description="BTC/ETH/SOL 币安合约本地全量行情 — 无请求限制，仅供本地研究",
-        version="2.0.0",
+        version="2.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
     )
@@ -203,7 +204,9 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
     @app.get("/v1/depth/snapshots/latest")
     def depth_latest(symbol: str):
         rows = store.query(
-            "SELECT * FROM depth_snapshots WHERE symbol=? ORDER BY snapshot_time DESC LIMIT 1",
+            "SELECT * FROM depth_snapshots WHERE symbol=? "
+            "ORDER BY CASE WHEN snapshot_time > 4000000000000 THEN last_update_id "
+            "ELSE snapshot_time END DESC LIMIT 1",
             [symbol.upper()],
         )
         if not rows:
@@ -316,6 +319,102 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         if not rows:
             raise HTTPException(404, "无数据")
         return rows[0]
+
+    # ── 聚合 tick（paper wallet 对接）──
+
+    @app.get("/v1/tick/latest")
+    def tick_latest(
+        symbol: str,
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+    ):
+        result = tick_svc.tick_latest(
+            store, symbol, include_depth=include_depth, depth_levels=depth_levels,
+        )
+        if not result:
+            raise HTTPException(404, "无数据")
+        return result
+
+    @app.get("/v1/ticks/latest")
+    def ticks_latest(
+        symbols: str = Query(..., description="逗号分隔，如 BTCUSDT,ETHUSDT"),
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+    ):
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        if not sym_list:
+            raise HTTPException(400, "symbols 不能为空")
+        result = tick_svc.ticks_latest(
+            store, sym_list, include_depth=include_depth, depth_levels=depth_levels,
+        )
+        if not result["ticks"]:
+            raise HTTPException(404, "无数据")
+        return result
+
+    @app.get("/v1/tick/at")
+    def tick_at(
+        symbol: str,
+        timestamp: int = Query(..., description="Unix 毫秒"),
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+        tolerance_ms: int = Query(60_000, ge=0),
+    ):
+        result = tick_svc.tick_at(
+            store, symbol, timestamp,
+            include_depth=include_depth, depth_levels=depth_levels,
+            tolerance_ms=tolerance_ms,
+        )
+        if not result:
+            raise HTTPException(404, "无数据或超出 tolerance_ms")
+        return result
+
+    @app.get("/v1/ticks/range")
+    def ticks_range(
+        symbol: str,
+        start_time: int = Query(..., description="起始 open_time（ms）"),
+        end_time: int = Query(..., description="结束 open_time（ms）"),
+        interval: str = "1h",
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+        limit: int = Query(5000, ge=1),
+        offset: int = 0,
+    ):
+        return tick_svc.ticks_range(
+            store, symbol, start_time, end_time, interval,
+            include_depth=include_depth, depth_levels=depth_levels,
+            limit=limit, offset=offset,
+        )
+
+    @app.get("/v1/backtest/bars")
+    def backtest_bars(
+        symbol: str,
+        interval: str = "1h",
+        start_time: int = Query(..., description="起始 open_time（ms）"),
+        end_time: int = Query(..., description="结束 open_time（ms）"),
+        limit: int = Query(5000, ge=1),
+        offset: int = 0,
+    ):
+        return tick_svc.backtest_bars(
+            store, symbol, interval, start_time, end_time,
+            limit=limit, offset=offset,
+        )
+
+    # paper wallet 兼容路径
+    @app.get("/v1/market/tick/{symbol}")
+    def market_tick_compat(
+        symbol: str,
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+    ):
+        return tick_latest(symbol, include_depth=include_depth, depth_levels=depth_levels)
+
+    @app.get("/v1/market/ticks")
+    def market_ticks_compat(
+        symbols: str = Query(..., description="逗号分隔"),
+        include_depth: bool = False,
+        depth_levels: int = Query(20, ge=1, le=1000),
+    ):
+        return ticks_latest(symbols=symbols, include_depth=include_depth, depth_levels=depth_levels)
 
     # ── 通用查询 ──
 
