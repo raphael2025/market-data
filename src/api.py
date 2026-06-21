@@ -11,6 +11,71 @@ from .storage import ALL_TABLES, MarketStore
 from . import tick as tick_svc
 from .health import stream_status
 
+# 每张表用于分页排序的时间戳列。
+# 必须存在且为 INTEGER — 由 _resolve_order_col 校验，避免 SQL 注入。
+TABLE_TIME_COL: dict[str, str] = {
+    "klines": "open_time",
+    "mark_price_klines": "open_time",
+    "index_price_klines": "open_time",
+    "continuous_klines": "open_time",
+    "kline_updates": "event_time",
+    "agg_trades": "trade_time",
+    "trades": "trade_time",
+    "mark_prices": "event_time",
+    "book_tickers": "event_time",
+    "ticker_price": "event_time",
+    "ticker_24h": "event_time",
+    "ticker_snapshots": "event_time",
+    "depth_snapshots": "snapshot_time",
+    "depth_updates": "event_time",
+    "depth_gaps": "gap_start_ms",
+    "open_interest": "event_time",
+    "open_interest_hist": "event_time",
+    "funding_rates": "funding_time",
+    "funding_info": "snapshot_time",
+    "long_short_ratio": "event_time",
+    "basis": "event_time",
+    "liquidations": "event_time",
+    "insurance_balance": "snapshot_time",
+    "delivery_prices": "delivery_time",
+    "exchange_info": "snapshot_time",
+}
+
+# 整数类型列名集合（PRAGMA table_info 返回的 type 字段）
+_INT_TYPES = {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT"}
+
+
+def _resolve_order_col(store: MarketStore, table: str, time_col: str | None) -> str:
+    """解析 ORDER BY 列名。
+
+    优先使用显式传入的 time_col；若未传入则从 PRAGMA table_info 自动探测
+    （跳过 'symbol' / 'pair'，挑首个 INTEGER 列）。
+
+    列名必须在表 schema 里存在 — 否则抛 400，杜绝任何注入路径。
+    """
+    if table not in ALL_TABLES:
+        raise HTTPException(400, f"未知表: {table}")
+    cols = store.query(f"PRAGMA table_info({table})")
+    col_map = {c["name"]: (c["type"] or "").upper() for c in cols}
+    if not col_map:
+        raise HTTPException(500, f"无法读取表 {table} 的 schema")
+
+    if time_col:
+        if time_col not in col_map:
+            raise HTTPException(
+                400, f"表 {table} 不存在列 {time_col}，可选: {list(col_map)}"
+            )
+        return time_col
+
+    # 自动探测：排除 'symbol' / 'pair'，取首个 INTEGER
+    for name, ctype in col_map.items():
+        if name in ("symbol", "pair"):
+            continue
+        if any(t in ctype for t in _INT_TYPES):
+            return name
+    # 兜底：取第一个列名（极端情况，比如全 TEXT 表）
+    return next(iter(col_map))
+
 
 def _paginate(
     store: MarketStore,
@@ -20,11 +85,16 @@ def _paginate(
     order: str = "DESC",
     limit: int = 1000,
     offset: int = 0,
+    time_col: str | None = None,
 ) -> dict:
     params = list(params or [])
     count_sql = f"SELECT COUNT(*) AS total FROM {table} {where}"
     total = store.query(count_sql, params)[0]["total"]
-    data_sql = f"SELECT * FROM {table} {where} ORDER BY 1 {order} LIMIT ? OFFSET ?"
+    order_col = _resolve_order_col(store, table, time_col)
+    data_sql = (
+        f"SELECT * FROM {table} {where} "
+        f"ORDER BY {order_col} {order} LIMIT ? OFFSET ?"
+    )
     rows = store.query(data_sql, params + [limit, offset])
     return {"total": total, "limit": limit, "offset": offset, "data": rows}
 
@@ -89,7 +159,10 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             where += " AND open_time>=?"; params.append(start_time)
         if end_time:
             where += " AND open_time<=?"; params.append(end_time)
-        return _paginate(store, "klines", where, params, limit=limit, offset=offset)
+        return _paginate(
+            store, "klines", where, params, limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["klines"],
+        )
 
     @app.get("/v1/mark-price-klines")
     def mark_price_klines(symbol: str, interval: str = "1h", limit: int = 1000, offset: int = 0):
@@ -97,6 +170,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             store, "mark_price_klines",
             "WHERE symbol=? AND interval=?", [symbol.upper(), interval],
             limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["mark_price_klines"],
         )
 
     @app.get("/v1/index-price-klines")
@@ -105,6 +179,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             store, "index_price_klines",
             "WHERE pair=? AND interval=?", [pair.upper(), interval],
             limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["index_price_klines"],
         )
 
     @app.get("/v1/continuous-klines")
@@ -117,6 +192,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             "WHERE pair=? AND contract_type=? AND interval=?",
             [pair.upper(), contract_type, interval],
             limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["continuous_klines"],
         )
 
     @app.get("/v1/kline-updates")
@@ -127,7 +203,11 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         where, params = "WHERE symbol=? AND interval=?", [symbol.upper(), interval]
         if start_time:
             where += " AND event_time>=?"; params.append(start_time)
-        return _paginate(store, "kline_updates", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "kline_updates", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["kline_updates"],
+        )
 
     # ── 成交 ──
 
@@ -136,14 +216,22 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         where, params = "WHERE symbol=?", [symbol.upper()]
         if start_time:
             where += " AND trade_time>=?"; params.append(start_time)
-        return _paginate(store, "agg_trades", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "agg_trades", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["agg_trades"],
+        )
 
     @app.get("/v1/trades")
     def trades(symbol: str, start_time: int | None = None, limit: int = 5000, offset: int = 0):
         where, params = "WHERE symbol=?", [symbol.upper()]
         if start_time:
             where += " AND trade_time>=?"; params.append(start_time)
-        return _paginate(store, "trades", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "trades", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["trades"],
+        )
 
     # ── 价格 / 行情 ──
 
@@ -152,6 +240,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "mark_prices", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["mark_prices"],
         )
 
     @app.get("/v1/mark-price/latest")
@@ -169,6 +258,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "book_tickers", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["book_tickers"],
         )
 
     @app.get("/v1/book-ticker/latest")
@@ -186,6 +276,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "ticker_price", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["ticker_price"],
         )
 
     @app.get("/v1/ticker/24h")
@@ -193,6 +284,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "ticker_24h", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["ticker_24h"],
         )
 
     @app.get("/v1/ticker/24h/latest")
@@ -212,7 +304,11 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         where, params = "WHERE symbol=?", [symbol.upper()]
         if event_type:
             where += " AND event_type=?"; params.append(event_type)
-        return _paginate(store, "ticker_snapshots", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "ticker_snapshots", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["ticker_snapshots"],
+        )
 
     # ── 深度 ──
 
@@ -221,6 +317,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "depth_snapshots", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["depth_snapshots"],
         )
 
     @app.get("/v1/depth/snapshots/latest")
@@ -242,7 +339,11 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         where, params = "WHERE symbol=?", [symbol.upper()]
         if start_time:
             where += " AND event_time>=?"; params.append(start_time)
-        return _paginate(store, "depth_updates", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "depth_updates", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["depth_updates"],
+        )
 
     # ── 持仓 / 资金费率 ──
 
@@ -251,6 +352,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "open_interest", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["open_interest"],
         )
 
     @app.get("/v1/open-interest/latest")
@@ -269,6 +371,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             store, "open_interest_hist",
             "WHERE symbol=? AND period=?", [symbol.upper(), period],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["open_interest_hist"],
         )
 
     @app.get("/v1/funding-rates")
@@ -276,6 +379,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "funding_rates", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["funding_rates"],
         )
 
     @app.get("/v1/funding-info")
@@ -283,7 +387,11 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         where, params = "", []
         if symbol:
             where, params = "WHERE symbol=?", [symbol.upper()]
-        return _paginate(store, "funding_info", where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "funding_info", where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["funding_info"],
+        )
 
     # ── 多空比 / 基差 / 爆仓 ──
 
@@ -297,6 +405,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             "WHERE symbol=? AND data_type=? AND period=?",
             [symbol.upper(), data_type, period],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["long_short_ratio"],
         )
 
     @app.get("/v1/basis")
@@ -309,6 +418,7 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
             "WHERE pair=? AND contract_type=? AND period=?",
             [pair.upper(), contract_type, period],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["basis"],
         )
 
     @app.get("/v1/liquidations")
@@ -316,24 +426,33 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         return _paginate(
             store, "liquidations", "WHERE symbol=?", [symbol.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["liquidations"],
         )
 
     # ── 系统 / 元数据 ──
 
     @app.get("/v1/insurance-balance")
     def insurance_balance(limit: int = 500, offset: int = 0):
-        return _paginate(store, "insurance_balance", limit=limit, offset=offset)
+        return _paginate(
+            store, "insurance_balance", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["insurance_balance"],
+        )
 
     @app.get("/v1/delivery-prices")
     def delivery_prices(pair: str, limit: int = 500, offset: int = 0):
         return _paginate(
             store, "delivery_prices", "WHERE pair=?", [pair.upper()],
             order="DESC", limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["delivery_prices"],
         )
 
     @app.get("/v1/exchange-info")
     def exchange_info(limit: int = 100, offset: int = 0):
-        return _paginate(store, "exchange_info", order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, "exchange_info", order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL["exchange_info"],
+        )
 
     @app.get("/v1/exchange-info/latest")
     def exchange_info_latest():
@@ -454,7 +573,11 @@ def create_app(config: Config, store: MarketStore) -> FastAPI:
         if symbol and sym_col in ("symbol", "pair"):
             where = f"WHERE {sym_col}=?"
             params = [symbol.upper()]
-        return _paginate(store, table, where, params, order="DESC", limit=limit, offset=offset)
+        return _paginate(
+            store, table, where, params, order="DESC",
+            limit=limit, offset=offset,
+            time_col=TABLE_TIME_COL.get(table),
+        )
 
     # 兼容旧版路径
     @app.get("/klines")
