@@ -14,7 +14,7 @@
 |---|---|
 | 基址 | `http://localhost:8765` |
 | 交互式文档 | http://localhost:8765/docs |
-| 数据库文件 | `/home/raphael/market-data/data/market.db` |
+| 数据库文件 | `~/market-data/data/market.db` |
 | 认证 | 无 |
 | 请求限制 | **无** |
 | 数据更新 | 7×24 持续写入 |
@@ -128,7 +128,7 @@ console.log(book.bid_price, book.ask_price);
 ```python
 import sqlite3
 
-DB = "/home/raphael/market-data/data/market.db"
+DB = "~/market-data/data/market.db"
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
 

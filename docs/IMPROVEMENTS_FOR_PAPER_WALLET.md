@@ -3,7 +3,7 @@
 > **状态：已实现（v2.2.0）** — 见 `src/tick.py`、`src/health.py`、`docs/API.md`  
 > 目标：让 `market-data` 更好地服务 `crypto_paper_wallet` 模拟钱包及各类回测引擎。  
 > 原则：**不重做采集**，只在现有 23 张表之上增加聚合查询层。  
-> 关联项目：`/home/raphael/crypto_paper_wallet`（端口 8000）
+> 关联项目：`~/crypto_paper_wallet`（端口 8000）
 
 ---
 
@@ -434,11 +434,11 @@ Phase 3（按需）
 
 ```bash
 # 先启动两个服务
-cd /home/raphael/market-data && ./scripts/run_server.sh
-cd /home/raphael/crypto_paper_wallet && ./scripts/run_server.sh
+cd ~/market-data && ./scripts/run_server.sh
+cd ~/crypto_paper_wallet && ./scripts/run_server.sh
 
 # 运行 32 项深度测试
-cd /home/raphael/crypto_paper_wallet
+cd ~/crypto_paper_wallet
 python scripts/deep_integration_test.py
 ```
 

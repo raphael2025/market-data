@@ -112,7 +112,7 @@
 一次安装，开机自启，崩溃自动重启。**日常使用只需这一步。**
 
 ```bash
-cd /home/raphael/market-data
+cd ~/market-data
 
 # 安装依赖 + 注册系统服务
 ./install-service.sh
@@ -143,7 +143,7 @@ curl http://localhost:8765/tables
 ### 方式二：手动启动（开发调试）
 
 ```bash
-cd /home/raphael/market-data
+cd ~/market-data
 
 # 首次需要安装依赖
 python3 -m venv .venv
